@@ -13,12 +13,16 @@ LIBUSB_VER=1.0.29
 mkdir -p out/deps
 
 # fetch URL FILE SHA256: download, and refuse to continue unless the checksum matches.
-# The pinned values are those of the archives as first downloaded for this project.
+# The pinned values are those of the archives as first downloaded for this project. The OBS
+# and SIMDe URLs are GitHub's generated tag archives, whose bytes are not guaranteed to stay
+# identical forever: a mismatch there may be benign, but check before updating the pin.
 fetch() {
     curl -sfL -o "$2" "$1" || { echo "download failed: $1" >&2; rm -f "$2"; exit 1; }
     if [ -z "$3" ]; then
         echo "note: no pinned checksum for $1" >&2
         echo "      got $(shasum -a 256 "$2" | cut -d' ' -f1); add it to OBS_SHA256 in $0" >&2
+        # fine for a local build; not for something other people will install
+        if [ -n "${REQUIRE_PINNED:-}" ]; then rm -f "$2"; exit 1; fi
     elif [ "$(shasum -a 256 "$2" | cut -d' ' -f1)" != "$3" ]; then
         echo "checksum mismatch for $1" >&2; rm -f "$2"; exit 1
     fi

@@ -39,6 +39,44 @@ The first build downloads three things into `out/deps`: the `libobs` headers for
 
 The command-line tools (`out/evc-capture` and the USB diagnostics) are built as well if Homebrew's libusb is present (`brew install libusb`).
 
+## How it works: a driver inside a plugin
+
+It is both. The **driver** is a small library, `libevc`, that knows how to talk to the dongle. The **plugin** is what OBS loads; it contains the driver and hands OBS the frames. There is no separate driver to install in macOS.
+
+```mermaid
+flowchart TB
+    tape["VCR / camera<br/>composite or S-Video, line audio"]
+    dongle["Elgato Video Capture dongle<br/>USB 0fd9:0037, Conexant CX231xx"]
+    tape -- analogue --> dongle
+
+    subgraph mac["Your Mac"]
+        macos["macOS USB stack<br/>no kernel driver claims the dongle"]
+        subgraph obs["OBS Studio (one process)"]
+            subgraph bundle["elgato-video-capture.plugin"]
+                libusb["libusb<br/>USB transfers from user space"]
+                libevc["libevc — the DRIVER<br/>powers up and configures the chip,<br/>reads the stream, assembles frames"]
+                source["OBS source — the PLUGIN part<br/>settings, standard detection,<br/>reconnects after unplug"]
+                libusb --> libevc --> source
+            end
+            scene["Your scene: preview, recording, streaming<br/>OBS deinterlaces and encodes at the quality you choose"]
+            source -- "uncompressed UYVY video + 48 kHz PCM audio" --> scene
+        end
+        macos --> libusb
+    end
+    dongle -- "USB 2.0, about 20 MB/s" --> macos
+```
+
+| Layer | What it is | Where |
+|---|---|---|
+| Hardware | The dongle digitises the analogue signal and sends raw video and audio over USB | |
+| macOS | Passes USB traffic through. The dongle's interfaces are vendor-specific, so macOS attaches no driver of its own and an application may use them directly | |
+| libusb | Open-source library for USB access from an ordinary program | compiled into the plugin |
+| **Driver** (`libevc`) | The device-specific part: the start-up sequence, input and standard selection, and turning the USB byte stream into video frames and audio samples | `src/libevc` |
+| **Plugin** | Wraps the driver as an OBS source with a settings panel | `src/obs-plugin` |
+| OBS | Everything after that: deinterlacing, scaling, encoding, recording | |
+
+The same driver library also runs outside OBS, in the command-line tool `evc-capture` (`src/tools`). Because the driver lives inside the plugin, the dongle appears only in OBS, not as a system-wide camera in other applications; that would need a separate macOS camera extension ([chapter 5](docs/05-macos-driver.md#56-known-limitations-and-next-steps)).
+
 ## How it was made
 
 Elgato's Windows driver was unpacked and decompiled with Ghidra to learn how the device is initialised and what it sends. That identified the chip as a Conexant CX231xx, for which Linux has an open-source driver, and the macOS driver is a port of the Linux register sequences corrected against the vendor driver's settings for this board and checked on the hardware. It is a reimplementation: a Windows kernel driver cannot be recompiled for macOS, for reasons set out in [chapter 1](docs/01-drivers-and-porting.md).

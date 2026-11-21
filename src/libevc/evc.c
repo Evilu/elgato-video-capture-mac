@@ -131,6 +131,7 @@ struct evc {
     int line;              /* lines completed in the current field */
     int line_pos;          /* bytes copied into the current line, -1 = not in a line */
     int field1_lines, field2_lines;
+    int damaged;           /* data was lost since field 1 of this frame began */
     uint8_t *frame;
     uint8_t line_buf[LINE_BYTES];
     mach_timebase_info_data_t tb;
@@ -165,7 +166,7 @@ static int io_failed(evc *e, const char *what, unsigned a, unsigned b, int r) {
     return -1;
 }
 
-int evc_reg_read(evc *e, uint16_t reg, uint32_t *val) {
+static int reg_read(evc *e, uint16_t reg, uint32_t *val) {
     uint8_t b[4] = {0};
     *val = 0;
     if (e->io_err) return -1;
@@ -187,7 +188,7 @@ static int reg_write(evc *e, uint16_t reg, uint32_t val) {
 
 static int reg_or(evc *e, uint16_t reg, uint32_t bits) {
     uint32_t v;
-    if (evc_reg_read(e, reg, &v)) return -1;
+    if (reg_read(e, reg, &v)) return -1;
     return reg_write(e, reg, v | bits);
 }
 
@@ -197,7 +198,7 @@ static uint16_t i2c_wvalue(uint8_t addr8, int saddr_len) {
     return (uint16_t)((addr8 >> 1) << 9 | I2C_SPEED_100K << 4 | saddr_len << 2 | I2C_SYNC);
 }
 
-int evc_i2c_read(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t *val, int len) {
+static int i2c_read(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t *val, int len) {
     uint8_t b[4] = {0};
     *val = 0;
     if (len < 1 || len > 4 || saddr_len < 0 || saddr_len > 2) return -1;
@@ -209,7 +210,7 @@ int evc_i2c_read(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t 
     return 0;
 }
 
-int evc_i2c_write(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t val, int len) {
+static int i2c_write(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t val, int len) {
     uint8_t b[4] = {val, val >> 8, val >> 16, val >> 24};
     if (len < 1 || len > 4 || saddr_len < 0 || saddr_len > 2) return -1;
     if (e->io_err) return -1;
@@ -219,22 +220,36 @@ int evc_i2c_write(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t
     return 0;
 }
 
-static int afe_w(evc *e, uint16_t a, uint8_t v) { return evc_i2c_write(e, AFE, a, 2, v, 1); }
+/* Public raw access: each call starts from a clean error state. */
+int evc_reg_read(evc *e, uint16_t reg, uint32_t *val) {
+    e->io_err = 0;
+    return reg_read(e, reg, val);
+}
+int evc_i2c_read(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t *val, int len) {
+    e->io_err = 0;
+    return i2c_read(e, addr8, saddr, saddr_len, val, len);
+}
+int evc_i2c_write(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t val, int len) {
+    e->io_err = 0;
+    return i2c_write(e, addr8, saddr, saddr_len, val, len);
+}
+
+static int afe_w(evc *e, uint16_t a, uint8_t v) { return i2c_write(e, AFE, a, 2, v, 1); }
 static int afe_r(evc *e, uint16_t a, uint8_t *v) {
     uint32_t t = 0;
-    int r = evc_i2c_read(e, AFE, a, 2, &t, 1);
+    int r = i2c_read(e, AFE, a, 2, &t, 1);
     *v = (uint8_t)t;
     return r;
 }
-static int vid_w8(evc *e, uint16_t a, uint8_t v) { return evc_i2c_write(e, VID, a, 2, v, 1); }
+static int vid_w8(evc *e, uint16_t a, uint8_t v) { return i2c_write(e, VID, a, 2, v, 1); }
 static int vid_r8(evc *e, uint16_t a, uint8_t *v) {
     uint32_t t = 0;
-    int r = evc_i2c_read(e, VID, a, 2, &t, 1);
+    int r = i2c_read(e, VID, a, 2, &t, 1);
     *v = (uint8_t)t;
     return r;
 }
-static int vid_w32(evc *e, uint16_t a, uint32_t v) { return evc_i2c_write(e, VID, a, 2, v, 4); }
-static int vid_r32(evc *e, uint16_t a, uint32_t *v) { return evc_i2c_read(e, VID, a, 2, v, 4); }
+static int vid_w32(evc *e, uint16_t a, uint32_t v) { return i2c_write(e, VID, a, 2, v, 4); }
+static int vid_r32(evc *e, uint16_t a, uint32_t *v) { return i2c_read(e, VID, a, 2, v, 4); }
 static int vid_andor8(evc *e, uint16_t a, uint8_t and_mask, uint8_t or_val) {
     uint8_t v;
     if (vid_r8(e, a, &v)) return -1;
@@ -342,7 +357,7 @@ static int afe_adjust_ref_count(evc *e) {
 
 static int set_power_external_av(evc *e) {
     uint32_t v;
-    if (evc_reg_read(e, PWR_CTL_EN, &v)) return -1;
+    if (reg_read(e, PWR_CTL_EN, &v)) return -1;
     v &= ~PWR_MODE_MASK;
     v |= PWR_AV_EN;
     reg_write(e, PWR_CTL_EN, v);
@@ -354,7 +369,7 @@ static int set_power_external_av(evc *e) {
     if (reg_write(e, PWR_CTL_EN, v)) return -1;
     msleep(10);
     if (afe_power_external_av(e)) return -1;
-    return evc_i2c_write(e, I2S, CH_PWR_CTRL2, 1, 0x00, 1);
+    return i2c_write(e, I2S, CH_PWR_CTRL2, 1, 0x00, 1);
 }
 
 static int dif_baseband(evc *e) {
@@ -366,9 +381,9 @@ static int dif_baseband(evc *e) {
 
 static int i2s_init(evc *e) {
     uint32_t v = 0;
-    evc_i2c_read(e, I2S, CH_PWR_CTRL1, 1, &v, 1);
-    evc_i2c_write(e, I2S, CH_PWR_CTRL1, 1, v | 0x80, 1); /* clock to delta-sigma + decimator */
-    return evc_i2c_write(e, I2S, CH_PWR_CTRL2, 1, 0x00, 1); /* power up all channels */
+    i2c_read(e, I2S, CH_PWR_CTRL1, 1, &v, 1);
+    i2c_write(e, I2S, CH_PWR_CTRL1, 1, v | 0x80, 1); /* clock to delta-sigma + decimator */
+    return i2c_write(e, I2S, CH_PWR_CTRL2, 1, 0x00, 1); /* power up all channels */
 }
 
 /* ---------------------------------------------------------------- decoder (cx25840-style) */
@@ -544,8 +559,8 @@ static int set_video_input(evc *e) {
 
 static int set_audio_line_in(evc *e) {
     uint32_t v;
-    evc_i2c_write(e, I2S, CH_PWR_CTRL2, 1, 0x00, 1);
-    evc_i2c_write(e, I2S, CH_PWR_CTRL1, 1, 0x80, 1);
+    i2c_write(e, I2S, CH_PWR_CTRL2, 1, 0x00, 1);
+    i2c_write(e, I2S, CH_PWR_CTRL1, 1, 0x80, 1);
 
     vid_andor8(e, GENERAL_CTL, ~0x01, 0x01); /* soft reset */
     vid_w32(e, AUD_IO_CTRL, 0);              /* channel 1 from the decoder's parallel output */
@@ -645,7 +660,7 @@ int evc_init(evc *e, evc_std std, evc_input input) {
     e->input = input;
     set_geometry(e);
 
-    if (evc_reg_read(e, BOARD_CFG_STAT, &v)) return -1;
+    if (reg_read(e, BOARD_CFG_STAT, &v)) return -1;
     if (e->verbose) elog(e, "evc: board config %08x, hardware revision %04x\n", v, e->bcd_device);
 
     if (set_power_external_av(e)) return -1;
@@ -742,6 +757,9 @@ void evc_get_stats(evc *e, evc_stats *st) { *st = e->st; }
 /* ---------------------------------------------------------------- video stream parser */
 
 static void emit_frame(evc *e, int complete) {
+    /* a field that lost a line can still reach its line count from the spare lines the
+     * decoder sends, with everything after the gap one row too high */
+    if (e->damaged) complete = 0;
     e->st.frames++;
     if (!complete) e->st.incomplete_frames++;
     if (e->vcb) e->vcb(e->user, e->frame, (size_t)LINE_BYTES * e->height, EVC_WIDTH, e->height, now_ns(e), complete);
@@ -752,6 +770,7 @@ static void begin_field(evc *e, int field) {
         /* a new frame starts; flush the previous one if its second field never completed */
         if (e->field == 2 && e->field2_lines < e->lines_per_field && e->field2_lines > 0) emit_frame(e, 0);
         e->field1_lines = e->field2_lines = 0;
+        e->damaged = 0;
     }
     e->field = field;
     e->line = 0;
@@ -841,16 +860,22 @@ static void requeue(evc *e, struct libusb_transfer *t, int *bad) {
 
 static void LIBUSB_CALL video_done(struct libusb_transfer *t) {
     evc *e = t->user_data;
+    if (!e->streaming) { /* stopping: the host's callbacks may already be gone */
+        requeue(e, t, &e->bad_video);
+        return;
+    }
     if (t->status == LIBUSB_TRANSFER_COMPLETED) {
         for (int i = 0; i < t->num_iso_packets; i++) {
             struct libusb_iso_packet_descriptor *d = &t->iso_packet_desc[i];
             e->st.iso_packets++;
             if (d->status != LIBUSB_TRANSFER_COMPLETED) {
-                /* bytes are missing: abandon the current line and find the next timing code,
-                 * rather than splice two lines together and miscount the rest of the field */
+                /* bytes are missing: abandon the current line and find the next timing code
+                 * rather than splice two lines together. The lost line is not counted, so
+                 * the rest of the field sits a row high; the frame is flagged instead. */
                 e->st.iso_errors++;
                 e->line_pos = -1;
                 e->sync = 0;
+                e->damaged = 1;
                 continue;
             }
             if (!d->actual_length) continue;
@@ -861,13 +886,14 @@ static void LIBUSB_CALL video_done(struct libusb_transfer *t) {
     } else {
         e->line_pos = -1;
         e->sync = 0;
+        e->damaged = 1;
     }
     requeue(e, t, &e->bad_video);
 }
 
 static void LIBUSB_CALL audio_done(struct libusb_transfer *t) {
     evc *e = t->user_data;
-    if (t->status == LIBUSB_TRANSFER_COMPLETED) {
+    if (t->status == LIBUSB_TRANSFER_COMPLETED && e->streaming) {
         size_t n = 0;
         for (int i = 0; i < t->num_iso_packets; i++) {
             struct libusb_iso_packet_descriptor *d = &t->iso_packet_desc[i];
@@ -921,7 +947,7 @@ int evc_start(evc *e, evc_video_cb vcb, evc_audio_cb acb, void *user) {
     e->acb = acb;
     e->user = user;
     memset(&e->st, 0, sizeof(e->st));
-    e->sync = e->field = e->line = e->field1_lines = e->field2_lines = 0;
+    e->sync = e->field = e->line = e->field1_lines = e->field2_lines = e->damaged = 0;
     e->line_pos = -1;
     memset(e->frame, 0, LINE_BYTES * MAX_HEIGHT);
 
@@ -951,7 +977,7 @@ int evc_stop(evc *e) {
     if (!e->streaming) return 0;
     e->streaming = 0;
     e->io_err = 0;
-    if (evc_reg_read(e, EP_MODE_SET, &v) == 0) reg_write(e, EP_MODE_SET, v & ~(uint32_t)(ENABLE_EP3 | ENABLE_EP4));
+    if (reg_read(e, EP_MODE_SET, &v) == 0) reg_write(e, EP_MODE_SET, v & ~(uint32_t)(ENABLE_EP3 | ENABLE_EP4));
     for (int i = 0; i < N_VIDEO_XFERS; i++)
         if (e->vx[i]) libusb_cancel_transfer(e->vx[i]);
     for (int i = 0; i < N_AUDIO_XFERS; i++)

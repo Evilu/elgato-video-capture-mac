@@ -11,7 +11,8 @@ NAME=elgato-video-capture
 ARCH="$(uname -m)"
 PKG="out/$NAME-$VERSION-macos-$ARCH.pkg"
 
-VERSION="$NUM" tools/build-obs-plugin.sh
+# a package is for other people: every downloaded source must match a pinned checksum
+REQUIRE_PINNED=1 VERSION="$NUM" tools/build-obs-plugin.sh
 
 STAGE=out/pkg
 rm -rf "$STAGE"

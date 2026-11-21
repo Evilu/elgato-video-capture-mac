@@ -61,6 +61,8 @@ int evc_set_saturation(evc *e, int v);
 int evc_set_hue(evc *e, int v);
 
 int evc_start(evc *e, evc_video_cb vcb, evc_audio_cb acb, void *user);
+/* Returns -1 if some transfers could not be reclaimed. The handle is then unusable and
+ * evc_close() deliberately leaks it, so the device stays claimed until the process exits. */
 int evc_stop(evc *e);
 /* Pump USB events for up to timeout_ms; call in a loop from one thread while streaming. */
 int evc_poll(evc *e, int timeout_ms);

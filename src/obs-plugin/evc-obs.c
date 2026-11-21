@@ -36,26 +36,31 @@ struct evc_source {
     bool reinit, picture_dirty;
 
     uint64_t last_frame_ns;
+    int incomplete_run; /* consecutive incomplete frames */
 };
 
 static void on_video(void *user, const uint8_t *uyvy, size_t len, int width, int height, uint64_t t, int complete) {
     struct evc_source *s = user;
     UNUSED_PARAMETER(len);
     UNUSED_PARAMETER(t);
-    /* a frame missing part of a field still holds rows of the previous one; OBS repeating
-     * the last good frame looks better than showing the mixture */
-    if (!complete) return;
+    /* the watchdog asks "is the device delivering?", so count every frame, shown or not */
+    s->last_frame_ns = os_gettime_ns();
+    /* A frame missing part of a field still holds rows of the previous one, and OBS repeating
+     * the last good frame looks better than an occasional mixture. But a worn tape, or a VCR
+     * in pause or search, may never send a complete frame: after a few in a row, show them,
+     * because a bad picture is better than a frozen one. */
+    if (complete) s->incomplete_run = 0;
+    else if (++s->incomplete_run <= 5) return;
     struct obs_source_frame frame = {0};
     frame.data[0] = (uint8_t *)uyvy;
     frame.linesize[0] = (uint32_t)width * 2;
     frame.width = (uint32_t)width;
     frame.height = (uint32_t)height;
     frame.format = VIDEO_FORMAT_UYVY;
-    frame.timestamp = os_gettime_ns();
+    frame.timestamp = s->last_frame_ns;
     frame.full_range = false;
     video_format_get_parameters_for_format(VIDEO_CS_601, VIDEO_RANGE_PARTIAL, VIDEO_FORMAT_UYVY, frame.color_matrix,
                                            frame.color_range_min, frame.color_range_max);
-    s->last_frame_ns = frame.timestamp;
     obs_source_output_video(s->source, &frame);
 }
 
@@ -132,6 +137,7 @@ static void *capture_thread(void *arg) {
         blog(LOG_INFO, "[elgato-video-capture] streaming %s %s, 720x%d", std == EVC_STD_PAL ? "PAL" : "NTSC",
              input == EVC_INPUT_SVIDEO ? "S-Video" : "composite", evc_height(dev));
         s->last_frame_ns = os_gettime_ns();
+        s->incomplete_run = 0;
 
         while (os_event_try(s->stop) == EAGAIN) {
             evc_poll(dev, 50);
@@ -149,9 +155,16 @@ static void *capture_thread(void *arg) {
                 break;
             }
         }
-        evc_stop(dev);
+        bool lost = evc_stop(dev) != 0;
         evc_close(dev);
         obs_source_output_video(s->source, NULL);
+        if (lost) {
+            /* the handle had to be abandoned with the device still claimed, so no reopen
+             * in this process can succeed */
+            blog(LOG_ERROR, "[elgato-video-capture] the USB device could not be released cleanly; "
+                            "restart OBS to use the capture device again");
+            break;
+        }
     }
     return NULL;
 }
