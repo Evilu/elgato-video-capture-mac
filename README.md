@@ -77,15 +77,51 @@ flowchart TB
 
 The same driver library also runs outside OBS, in the command-line tool `evc-capture` (`src/tools`). Because the driver lives inside the plugin, the dongle appears only in OBS, not as a system-wide camera in other applications; that would need a separate macOS camera extension ([chapter 5](docs/05-macos-driver.md#56-known-limitations-and-next-steps)).
 
+## Files you need, and where they go
+
+The repository is complete for building and using the plugin. Depending on what you want to do, a few things have to be on your Mac that are not in it.
+
+**To use the plugin (installed from the package):**
+
+| You need | Where it goes | Where to get it |
+|---|---|---|
+| OBS Studio 33 | `/Applications/OBS.app` | obsproject.com |
+| The installer package | Anywhere; open it and it installs the plugin to `~/Library/Application Support/obs-studio/plugins/elgato-video-capture.plugin` | The Releases page of this repository |
+
+**To build the plugin yourself:**
+
+| You need | Where it goes | Notes |
+|---|---|---|
+| Xcode command line tools | Installed by `xcode-select --install` | Compiler and packaging tools |
+| OBS Studio | `/Applications/OBS.app` | The plugin is built against the copy it finds. For another location: `OBS_APP=/path/to/OBS.app ./build.sh` |
+| libusb (optional) | Installed by `brew install libusb` | Only for the command-line tools. The plugin downloads and builds its own copy |
+
+Nothing has to be placed in the repository by hand. The build downloads the libobs headers, SIMDe and the libusb source into `out/deps/`, and writes its results to `out/`.
+
+**To study the Windows driver (optional, not needed for either of the above):**
+
+| You need | Where it goes | Notes |
+|---|---|---|
+| `Video_Capture_Driver_Installer.exe` | The top folder of the repository, next to `build.sh`, with exactly that name | Elgato's Windows driver installer for Video Capture, from Elgato's downloads page. For a copy somewhere else: `tools/unpack.sh /path/to/installer.exe` |
+| 7-Zip, Ghidra, a Java 21 runtime | Installed by `brew install sevenzip ghidra openjdk@21` | |
+
+The installer this project was developed against is version 7.07.0.127, 3,220,128 bytes, SHA-256 `3ba345bb3b9d21e264d31f1e78333c78ef6ce856c6615f28dffe7fb906b463f7`. A different version may unpack and decompile differently, and the function addresses quoted in `docs/` apply only to this one.
+
+Then `./build.sh analyse` produces, all inside the git-ignored `analysis/` folder:
+
+| Path | Contents |
+|---|---|
+| `analysis/unpacked/x64/`, `analysis/unpacked/x86/` | The files from the installer, separated by architecture. The driver for this dongle is `elvidcap.sys` |
+| `analysis/ghidra/out/x64_elvidcap_sys/` | `decomp.c`, `functions.tsv`, `strings.tsv`, `imports.tsv`: the decompiled driver as text |
+| `analysis/ghidra/proj/` | The Ghidra project, which can also be opened in the Ghidra application |
+
+The Linux reference drivers that the documentation compares against are not downloaded automatically. To follow those comparisons, get `drivers/media/usb/cx231xx/` and `drivers/media/i2c/cx25840/` from the Linux kernel source and put them in `analysis/reference/linux-cx231xx/` and `analysis/reference/linux-cx25840/`.
+
+Elgato's own macOS application and the OBS disk image are not needed in the repository; `.gitignore` ignores `*.app` and `*.dmg` there.
+
 ## How it was made
 
 Elgato's Windows driver was unpacked and decompiled with Ghidra to learn how the device is initialised and what it sends. That identified the chip as a Conexant CX231xx, for which Linux has an open-source driver, and the macOS driver is a port of the Linux register sequences corrected against the vendor driver's settings for this board and checked on the hardware. It is a reimplementation: a Windows kernel driver cannot be recompiled for macOS, for reasons set out in [chapter 1](docs/01-drivers-and-porting.md).
-
-```
-./build.sh analyse     # optional: unpack your copy of the installer and decompile it
-```
-
-needs `brew install sevenzip ghidra openjdk@21` and your own `Video_Capture_Driver_Installer.exe` in this directory.
 
 ## Layout
 
