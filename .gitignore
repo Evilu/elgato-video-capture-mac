@@ -9,3 +9,8 @@
 /analysis/
 /out/
 .DS_Store
+.idea/
+*.dSYM/
+# Vendor and third-party applications dropped here for comparison
+*.app/
+*.dmg
