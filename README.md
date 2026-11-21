@@ -6,7 +6,7 @@ It gives OBS the device's **uncompressed** output directly: 720×480 or 720×576
 
 ## Status
 
-Working on macOS 27 (Apple silicon) with OBS 33.0.2: a PAL VHS tape on the composite input shows in OBS with sound. NTSC and S-Video run but have only been tested without a signal. See [what is verified and what is not](docs/05-macos-driver.md#55-what-has-been-verified-and-what-has-not).
+**Alpha.** Working on macOS 27 (Apple silicon) with OBS 33.0.2: a PAL VHS tape on the composite input shows in OBS with sound. NTSC and S-Video run but have only been tested without a signal. See [what is verified and what is not](docs/05-macos-driver.md#55-what-has-been-verified-and-what-has-not).
 
 ## Install from the package
 
@@ -32,7 +32,7 @@ You need the Xcode command line tools (`xcode-select --install`) and OBS Studio 
 git clone https://github.com/Evilu/elgato-video-capture-mac.git
 cd elgato-video-capture-mac
 ./build.sh install        # build the plugin and install it for your user; then restart OBS
-./build.sh package 0.1.0  # or: build the installer, out/elgato-video-capture-0.1.0-macos-arm64.pkg
+./build.sh package 0.0.1-alpha  # or: build the installer, out/elgato-video-capture-0.0.1-alpha-macos-arm64.pkg
 ```
 
 The first build downloads three things into `out/deps`: the `libobs` headers for the OBS version you have installed, the SIMDe headers they need, and the libusb source, which is compiled into the plugin. The plugin is built for the OBS version it finds; rebuild after a major OBS update.

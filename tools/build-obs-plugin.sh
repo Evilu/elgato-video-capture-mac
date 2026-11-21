@@ -69,7 +69,7 @@ cat > "$BUNDLE/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>local.elgato-video-capture.obs-plugin</string>
     <key>CFBundleName</key><string>$NAME</string>
     <key>CFBundlePackageType</key><string>BNDL</string>
-    <key>CFBundleShortVersionString</key><string>${VERSION:-0.1.0}</string>
+    <key>CFBundleShortVersionString</key><string>${VERSION:-0.0.1}</string>
     <key>CFBundleVersion</key><string>1</string>
 </dict>
 </plist>

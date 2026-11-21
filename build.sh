@@ -14,7 +14,7 @@ case "${1:-build}" in
         ;;
 esac
 if [ "${1:-}" = package ]; then
-    tools/package.sh "${2:-0.1.0}"
+    tools/package.sh "${2:-0.0.1-alpha}"
     exit 0
 fi
 if [ -f "$(brew --prefix 2>/dev/null || echo /opt/homebrew)/lib/libusb-1.0.dylib" ]; then

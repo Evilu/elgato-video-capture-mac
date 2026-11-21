@@ -5,12 +5,13 @@
 #   tools/package.sh [version]
 set -eu
 cd "$(dirname "$0")/.."
-VERSION="${1:-0.1.0}"
+VERSION="${1:-0.0.1-alpha}"
+NUM="${VERSION%%-*}"   # numeric part, for the fields that must be numeric
 NAME=elgato-video-capture
 ARCH="$(uname -m)"
 PKG="out/$NAME-$VERSION-macos-$ARCH.pkg"
 
-VERSION="$VERSION" tools/build-obs-plugin.sh
+VERSION="$NUM" tools/build-obs-plugin.sh
 
 STAGE=out/pkg
 rm -rf "$STAGE"
@@ -24,7 +25,7 @@ pkgbuild --analyze --root "$STAGE/root" "$STAGE/component.plist" >/dev/null
 /usr/libexec/PlistBuddy -c "Set :0:BundleIsVersionChecked false" \
     -c "Add :0:BundleIsRelocatable bool false" "$STAGE/component.plist" >/dev/null
 pkgbuild --quiet --root "$STAGE/root" --component-plist "$STAGE/component.plist" \
-    --identifier "local.$NAME.obs-plugin" --version "$VERSION" \
+    --identifier "local.$NAME.obs-plugin" --version "$NUM" \
     --install-location "Library/Application Support/obs-studio/plugins" \
     "$STAGE/$NAME.pkg"
 
@@ -54,7 +55,7 @@ cat > "$STAGE/distribution.xml" <<XML
     <os-version min="13.0"/>
     <choices-outline><line choice="default"/></choices-outline>
     <choice id="default" title="OBS plugin"><pkg-ref id="local.$NAME.obs-plugin"/></choice>
-    <pkg-ref id="local.$NAME.obs-plugin" version="$VERSION">$NAME.pkg</pkg-ref>
+    <pkg-ref id="local.$NAME.obs-plugin" version="$NUM">$NAME.pkg</pkg-ref>
 </installer-gui-script>
 XML
 

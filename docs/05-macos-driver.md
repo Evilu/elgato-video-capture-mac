@@ -37,7 +37,7 @@ Requirements: Xcode command line tools and OBS Studio. Homebrew `libusb` is need
 ```sh
 ./build.sh                  # the plugin, plus the command-line tools if Homebrew libusb is installed
 ./build.sh install          # also copy the plugin to ~/Library/Application Support/obs-studio/plugins
-./build.sh package 0.1.0    # build the installer: out/elgato-video-capture-0.1.0-macos-arm64.pkg
+./build.sh package 0.0.1-alpha    # build the installer: out/elgato-video-capture-0.0.1-alpha-macos-arm64.pkg
 ```
 
 The plugin build (`tools/build-obs-plugin.sh`) fetches three things into `out/deps` the first time: the `libobs` headers for the exact OBS version installed (the plugin links against the `libobs.framework` inside `OBS.app`), SIMDe, which those headers need on Apple silicon, and the libusb source. libusb is built as a static library and linked in, so the plugin is one self-contained binary, built for macOS 13 and later (the oldest release OBS 33 supports) and ad-hoc signed.
