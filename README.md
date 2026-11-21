@@ -80,6 +80,6 @@ This project stands on other people's work:
 
 ## Licence and rights
 
-`src/` is GPL-2.0-or-later, because it ports code from the Linux kernel's `cx231xx` and `cx25840` drivers. OBS Studio is GPL-2.0-or-later as well.
+Everything in this repository is GPL-2.0-or-later (see `LICENSE`). The driver in `src/` has to be, because it ports code from the Linux kernel's `cx231xx` and `cx25840` drivers; OBS Studio is GPL-2.0-or-later as well. The released plugin statically links libusb (LGPL-2.1-or-later).
 
 Elgato, Elgato Video Capture and the Windows driver belong to their owners (Elgato, a Corsair brand). This is an independent interoperability project with no affiliation with or endorsement by them.

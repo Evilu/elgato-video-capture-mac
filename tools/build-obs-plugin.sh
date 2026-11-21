@@ -12,33 +12,52 @@ LIBUSB_VER=1.0.29
 [ -d "$OBS_APP" ] || { echo "OBS not found at $OBS_APP (set OBS_APP=...)" >&2; exit 1; }
 mkdir -p out/deps
 
+# fetch URL FILE SHA256: download, and refuse to continue unless the checksum matches.
+# The pinned values are those of the archives as first downloaded for this project.
+fetch() {
+    curl -sfL -o "$2" "$1" || { echo "download failed: $1" >&2; rm -f "$2"; exit 1; }
+    if [ -z "$3" ]; then
+        echo "note: no pinned checksum for $1" >&2
+        echo "      got $(shasum -a 256 "$2" | cut -d' ' -f1); add it to OBS_SHA256 in $0" >&2
+    elif [ "$(shasum -a 256 "$2" | cut -d' ' -f1)" != "$3" ]; then
+        echo "checksum mismatch for $1" >&2; rm -f "$2"; exit 1
+    fi
+}
+
 # libusb is built from source as a static library, so the plugin is a single file that
 # runs on any supported macOS and does not depend on Homebrew.
+LIBUSB_SHA256=5977fc950f8d1395ccea9bd48c06b3f808fd3c2c961b44b0c2e6e29fc3a70a85
 LIBUSB="out/deps/libusb-$LIBUSB_VER"
 if [ ! -f "$LIBUSB/libusb/.libs/libusb-1.0.a" ]; then
     echo "building libusb $LIBUSB_VER"
-    curl -sfL -o out/deps/libusb.tar.bz2 \
-        "https://github.com/libusb/libusb/releases/download/v$LIBUSB_VER/libusb-$LIBUSB_VER.tar.bz2"
+    fetch "https://github.com/libusb/libusb/releases/download/v$LIBUSB_VER/libusb-$LIBUSB_VER.tar.bz2" \
+        out/deps/libusb.tar.bz2 "$LIBUSB_SHA256"
     tar xjf out/deps/libusb.tar.bz2 -C out/deps
     rm out/deps/libusb.tar.bz2
     (cd "$LIBUSB" && ./configure --disable-shared --enable-static --quiet \
         CFLAGS="-O2 -mmacosx-version-min=$MIN_MACOS" >/dev/null && make -s -j4 >/dev/null)
 fi
 
+# libobs headers must match the installed OBS. Known versions are pinned; for any other
+# version the build goes ahead and prints the checksum to add here.
 VER="$(defaults read "$OBS_APP/Contents/Info.plist" CFBundleShortVersionString)"
+case "$VER" in
+    33.0.2) OBS_SHA256=628f260c39148bac1ca554207a5766e24d3e3beb3fdd5a292dc623a3fbed7cfc ;;
+    *) OBS_SHA256= ;;
+esac
 SRC="out/deps/obs-studio-$VER"
 if [ ! -f "$SRC/libobs/obs-module.h" ]; then
     echo "fetching libobs $VER headers"
-    mkdir -p out/deps
-    curl -sfL -o out/deps/obs.tar.gz "https://github.com/obsproject/obs-studio/archive/refs/tags/$VER.tar.gz"
+    fetch "https://github.com/obsproject/obs-studio/archive/refs/tags/$VER.tar.gz" out/deps/obs.tar.gz "$OBS_SHA256"
     tar xzf out/deps/obs.tar.gz -C out/deps "obs-studio-$VER/libobs"
     rm out/deps/obs.tar.gz
 fi
 # libobs headers use SIMDe (header-only SSE emulation) on Apple silicon.
 SIMDE_VER=0.8.2
+SIMDE_SHA256=ed2a3268658f2f2a9b5367628a85ccd4cf9516460ed8604eed369653d49b25fb
 if [ ! -f "out/deps/simde-$SIMDE_VER/simde/x86/sse2.h" ]; then
     echo "fetching SIMDe $SIMDE_VER headers"
-    curl -sfL -o out/deps/simde.tar.gz "https://github.com/simd-everywhere/simde/archive/refs/tags/v$SIMDE_VER.tar.gz"
+    fetch "https://github.com/simd-everywhere/simde/archive/refs/tags/v$SIMDE_VER.tar.gz" out/deps/simde.tar.gz "$SIMDE_SHA256"
     tar xzf out/deps/simde.tar.gz -C out/deps "simde-$SIMDE_VER/simde"
     rm out/deps/simde.tar.gz
 fi
@@ -49,7 +68,17 @@ printf '#pragma once\n#define OBS_RELEASE_CANDIDATE 0\n#define OBS_BETA 0\n' > o
 NAME=elgato-video-capture
 BUNDLE="out/$NAME.plugin"
 rm -rf "$BUNDLE"
-mkdir -p "$BUNDLE/Contents/MacOS"
+mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
+
+# The binary is GPL-2.0-or-later with LGPL libusb linked in: ship both licence texts and
+# say where the source is.
+cp LICENSE "$BUNDLE/Contents/Resources/LICENSE-GPL-2.0.txt"
+cp "$LIBUSB/COPYING" "$BUNDLE/Contents/Resources/LICENSE-libusb-LGPL-2.1.txt"
+cat > "$BUNDLE/Contents/Resources/SOURCE.txt" <<TXT
+Elgato Video Capture plugin for OBS Studio. GPL-2.0-or-later.
+Source code, including build scripts: https://github.com/Evilu/elgato-video-capture-mac
+Statically links libusb $LIBUSB_VER (LGPL-2.1-or-later), unmodified: https://github.com/libusb/libusb
+TXT
 
 cc -O2 -Wall -Wextra -std=gnu11 -fvisibility=hidden -bundle -mmacosx-version-min="$MIN_MACOS" \
     -Isrc/libevc -I"$SRC/libobs" -Iout/deps/obsconfig -I"out/deps/simde-$SIMDE_VER" -I"$LIBUSB/libusb" \

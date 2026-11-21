@@ -35,7 +35,8 @@ static void on_video(void *user, const uint8_t *uyvy, size_t len, int w, int h, 
     if (!complete) return;
     c->complete++;
     if (c->raw) fwrite(uyvy, 1, len, c->raw);
-    if (!c->last) c->last = malloc(len);
+    if (!c->last) c->last = malloc((size_t)EVC_WIDTH * 2 * 576);
+    if (!c->last) return;
     memcpy(c->last, uyvy, len);
     c->last_len = len;
     c->w = w;
@@ -116,7 +117,7 @@ int main(int argc, char **argv) {
     if (!frames && seconds <= 0) seconds = 3;
 
     evc *e;
-    if (evc_open(&e, verbose)) return 1;
+    if (evc_open(&e, verbose)) return 1; /* evc_open has said why */
     if (evc_init(e, std, input)) {
         fprintf(stderr, "device initialisation failed\n");
         evc_close(e);
@@ -139,7 +140,10 @@ int main(int argc, char **argv) {
 
     ctx c = {0};
     if (raw && !(c.raw = fopen(raw, "wb"))) perror(raw);
-    if (wav && (c.wav = fopen(wav, "wb"))) wav_header(c.wav, 0);
+    if (wav) {
+        if ((c.wav = fopen(wav, "wb"))) wav_header(c.wav, 0);
+        else perror(wav);
+    }
 
     signal(SIGINT, on_sigint);
     if (evc_start(e, on_video, on_audio, &c)) {
@@ -147,11 +151,11 @@ int main(int argc, char **argv) {
         evc_close(e);
         return 1;
     }
-    time_t t0 = time(NULL);
     struct timespec start;
     clock_gettime(CLOCK_MONOTONIC, &start);
     while (!g_stop) {
         evc_poll(e, 50);
+        if (!evc_alive(e)) { fprintf(stderr, "the device stopped responding\n"); break; }
         if (frames && c.complete >= (uint64_t)frames) break;
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
@@ -159,7 +163,6 @@ int main(int argc, char **argv) {
         if (seconds > 0 && el >= seconds) break;
         if (frames && el > 10 + frames / 10.0) { fprintf(stderr, "timed out waiting for frames\n"); break; }
     }
-    (void)t0;
     evc_stats st;
     evc_get_stats(e, &st);
     evc_stop(e);

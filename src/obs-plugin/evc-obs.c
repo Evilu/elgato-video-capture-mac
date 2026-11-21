@@ -42,7 +42,9 @@ static void on_video(void *user, const uint8_t *uyvy, size_t len, int width, int
     struct evc_source *s = user;
     UNUSED_PARAMETER(len);
     UNUSED_PARAMETER(t);
-    UNUSED_PARAMETER(complete);
+    /* a frame missing part of a field still holds rows of the previous one; OBS repeating
+     * the last good frame looks better than showing the mixture */
+    if (!complete) return;
     struct obs_source_frame frame = {0};
     frame.data[0] = (uint8_t *)uyvy;
     frame.linesize[0] = (uint32_t)width * 2;
@@ -95,7 +97,8 @@ static void *capture_thread(void *arg) {
         s->reinit = false;
         pthread_mutex_unlock(&s->lock);
 
-        if (evc_open(&dev, 0) || evc_init(dev, std == STD_AUTO ? EVC_STD_NTSC : std, input)) {
+        /* -1: the library stays silent; this thread logs, once per outage */
+        if (evc_open(&dev, -1) || evc_init(dev, std == STD_AUTO ? EVC_STD_NTSC : std, input)) {
             if (!warned) blog(LOG_WARNING, "[elgato-video-capture] device not available; will keep trying");
             warned = true;
             if (dev) evc_close(dev);
@@ -104,7 +107,21 @@ static void *capture_thread(void *arg) {
             continue;
         }
         warned = false;
-        if (std == STD_AUTO) std = evc_autodetect_std(dev);
+        if (os_event_try(s->stop) != EAGAIN) { /* removed or OBS quitting: do not start */
+            evc_close(dev);
+            break;
+        }
+        if (std == STD_AUTO) {
+            std = evc_autodetect_std(dev);
+            evc_signal sig = {0};
+            /* only NTSC-M (1) and PAL-BDGHI (4) are programmed; others get the right line
+             * count but the wrong colour subcarrier, so say so */
+            if (evc_get_signal(dev, &sig) == 0 && sig.video_present && sig.detected_fmt != 1 && sig.detected_fmt != 4)
+                blog(LOG_WARNING,
+                     "[elgato-video-capture] the decoder reports video format code %d, which is not supported; "
+                     "the picture may be black and white",
+                     sig.detected_fmt);
+        }
         apply_picture(s, dev);
         if (evc_start(dev, on_video, on_audio, s)) {
             blog(LOG_WARNING, "[elgato-video-capture] could not start streaming");

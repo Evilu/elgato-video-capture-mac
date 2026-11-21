@@ -23,7 +23,7 @@ There is no kernel component, no system extension and nothing to approve in Syst
 
 | Path | What it is |
 |---|---|
-| `src/libevc/evc.h`, `evc.c` | The driver: about 600 lines of C. Public API in `evc.h` |
+| `src/libevc/evc.h`, `evc.c` | The driver: about 1000 lines of C. Public API in `evc.h` |
 | `src/tools/evc-capture.c` | Command-line capture and diagnostics |
 | `src/obs-plugin/evc-obs.c` | OBS source plugin |
 | `tools/build-obs-plugin.sh` | Builds the plugin against the OBS installed on the machine |
@@ -40,7 +40,7 @@ Requirements: Xcode command line tools and OBS Studio. Homebrew `libusb` is need
 ./build.sh package 0.0.1-alpha    # build the installer: out/elgato-video-capture-0.0.1-alpha-macos-arm64.pkg
 ```
 
-The plugin build (`tools/build-obs-plugin.sh`) fetches three things into `out/deps` the first time: the `libobs` headers for the exact OBS version installed (the plugin links against the `libobs.framework` inside `OBS.app`), SIMDe, which those headers need on Apple silicon, and the libusb source. libusb is built as a static library and linked in, so the plugin is one self-contained binary, built for macOS 13 and later (the oldest release OBS 33 supports) and ad-hoc signed.
+The plugin build (`tools/build-obs-plugin.sh`) fetches three things into `out/deps` the first time: the `libobs` headers for the exact OBS version installed (the plugin links against the `libobs.framework` inside `OBS.app`), SIMDe, which those headers need on Apple silicon, and the libusb source. libusb is built as a static library and linked in, so the plugin is one self-contained binary, built for macOS 13 and later (the oldest release OBS 33 supports) and ad-hoc signed. Each download is checked against a pinned SHA-256; for an OBS version the script does not know, it prints the checksum it got so that it can be added.
 
 The installer (`tools/package.sh`) is a standard macOS package restricted to the current user's home directory, so it needs no administrator password. It is not signed with a Developer ID, which is why Gatekeeper asks for confirmation the first time; signing and notarising it would need a paid Apple Developer account.
 
@@ -54,7 +54,7 @@ To study the Windows driver as well (not needed to build or use the driver), put
 4. The picture is interlaced and woven, exactly as the Windows driver delivers it. Right-click the source ▸ **Deinterlacing** and pick a mode (Yadif 2x gives full motion at 59.94 or 50 fps). If motion looks jerky with deinterlacing on, switch the field order in the same menu.
 5. Pixels are not square: 720×480 and 720×576 both represent a 4:3 picture. Use Transform ▸ Edit Transform and set the bounding box to a 4:3 size (for example 1440×1080) with "Stretch to bounds".
 
-The source reopens the device automatically if it is unplugged and replugged, and restarts it if frames stop for three seconds. Only one program can use the dongle at a time, so quit Elgato's own application first.
+The source reopens the device automatically if it is unplugged and replugged, if USB transfers start failing, or if frames stop for three seconds. Frames with a missing or short field are not shown; OBS repeats the previous frame instead. Only one program can use the dongle at a time, so quit Elgato's own application first.
 
 ## 5.4 Command-line tool
 
@@ -105,8 +105,9 @@ Not yet verified, and the first things to check with a tape player or camera con
 3. **Standard changes while running.** Detection happens when the device opens. If the source changes standard mid-session, frames stop and the plugin reopens the device after three seconds, which re-detects.
 4. **System-wide camera.** To use the device in QuickTime, browsers or conferencing software, wrap `libevc` in a CoreMediaIO Camera Extension. That needs an Apple Developer ID, the system-extension entitlement and notarisation; the capture code would be reused unchanged.
 5. **First-generation hardware** (`0fd9:0033`, eMPIA chip) is a different device and is not supported.
-6. **Closed captions and VBI** are available from the device (4.8) and not captured.
+6. **Other colour systems.** Only NTSC-M and PAL-B/D/G/H/I are programmed. PAL-M, PAL-N, PAL-60, NTSC-4.43 and SECAM sources are captured with the right line count but the wrong colour subcarrier, so they will probably appear in black and white; the plugin logs a warning naming the detected format code. The per-format values are in Linux's `cx25840_std_setup`.
+7. **Closed captions and VBI** are available from the device (4.8) and not captured.
 
 ## 5.7 Licence
 
-`src/libevc` ports register sequences from the Linux `cx231xx` and `cx25840` drivers and is therefore **GPL-2.0-or-later**, as is the plugin that links it. OBS Studio is GPL-2.0-or-later. libusb (LGPL-2.1-or-later) is compiled from its unmodified release source and linked in. No Elgato code or firmware is included or required.
+The whole repository is **GPL-2.0-or-later** (`LICENSE`). For `src/libevc` that is a requirement, because it ports register sequences from the Linux `cx231xx` and `cx25840` drivers; the plugin links it, and the scripts and documentation are placed under the same licence for simplicity. OBS Studio is GPL-2.0-or-later. libusb (LGPL-2.1-or-later) is compiled from its unmodified release source and linked in. No Elgato code or firmware is included or required.

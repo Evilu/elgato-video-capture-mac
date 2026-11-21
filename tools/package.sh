@@ -42,7 +42,9 @@ After installing:
 
 Requires OBS Studio 33 on a Mac with Apple silicon, macOS 13 or later.
 
-This is an independent open-source project (GPL-2.0-or-later), not affiliated with Elgato.
+This is an independent open-source project, not affiliated with Elgato.
+Licence: GPL-2.0-or-later. Source code: https://github.com/Evilu/elgato-video-capture-mac
+The licence texts are installed inside the plugin, in Contents/Resources.
 TXT
 
 cat > "$STAGE/distribution.xml" <<XML

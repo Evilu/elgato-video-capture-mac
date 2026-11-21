@@ -13,6 +13,7 @@
 
 #include <libusb.h>
 #include <mach/mach_time.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -107,11 +108,16 @@ struct evc {
     int verbose;
     int claimed_video, claimed_audio;
     uint16_t bcd_device;
+    int io_err;            /* sticky: set by the first failed control transfer, see io_failed() */
     evc_std std;
     evc_input input;
 
     /* streaming */
     int streaming, active_xfers;
+    int stream_failed;     /* a transfer could not be resubmitted, or too many failed in a row */
+    int bad_video, bad_audio; /* consecutive transfers that did not complete, per endpoint */
+    int leaked;            /* transfers were still in flight at stop: nothing may be freed */
+    int16_t pcm[AUDIO_PKTS * 64];
     struct libusb_transfer *vx[N_VIDEO_XFERS], *ax[N_AUDIO_XFERS];
     evc_video_cb vcb;
     evc_audio_cb acb;
@@ -131,6 +137,15 @@ struct evc {
     FILE *dump; /* EVC_DUMP_STREAM=path: raw video endpoint bytes, for diagnostics */
 };
 
+/* verbose < 0 is silent, for hosts that do their own logging */
+static void elog(evc *e, const char *fmt, ...) {
+    if (e->verbose < 0) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+}
+
 static uint64_t now_ns(evc *e) {
     return mach_absolute_time() * e->tb.numer / e->tb.denom;
 }
@@ -139,13 +154,23 @@ static void msleep(int ms) { usleep(ms * 1000); }
 
 /* ---------------------------------------------------------------- bridge registers */
 
+/*
+ * Control-transfer errors are sticky. After the first failure reads return 0 and writes are
+ * not sent, so a failed read can never feed a stale or uninitialised value into a later
+ * write. Each public entry point clears the flag on entry and reports it on exit.
+ */
+static int io_failed(evc *e, const char *what, unsigned a, unsigned b, int r) {
+    if (!e->io_err) elog(e, "evc: %s %02x:%03x failed: %s\n", what, a, b, r < 0 ? libusb_error_name(r) : "short transfer");
+    e->io_err = 1;
+    return -1;
+}
+
 int evc_reg_read(evc *e, uint16_t reg, uint32_t *val) {
     uint8_t b[4] = {0};
+    *val = 0;
+    if (e->io_err) return -1;
     int r = libusb_control_transfer(e->h, 0xc0, VRT_GET_REGISTER, 0x0f, reg, b, 4, 1000);
-    if (r != 4) {
-        fprintf(stderr, "evc: reg read %#x failed: %s\n", reg, r < 0 ? libusb_error_name(r) : "short");
-        return -1;
-    }
+    if (r != 4) return io_failed(e, "bridge read", 0, reg, r);
     *val = b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;
     if (e->verbose > 1) fprintf(stderr, "  reg  R %04x = %08x\n", reg, *val);
     return 0;
@@ -153,12 +178,10 @@ int evc_reg_read(evc *e, uint16_t reg, uint32_t *val) {
 
 static int reg_write(evc *e, uint16_t reg, uint32_t val) {
     uint8_t b[4] = {val, val >> 8, val >> 16, val >> 24};
+    if (e->io_err) return -1;
     if (e->verbose > 1) fprintf(stderr, "  reg  W %04x = %08x\n", reg, val);
     int r = libusb_control_transfer(e->h, 0x40, VRT_SET_REGISTER, 0x0f, reg, b, 4, 1000);
-    if (r != 4) {
-        fprintf(stderr, "evc: reg write %#x failed: %s\n", reg, r < 0 ? libusb_error_name(r) : "short");
-        return -1;
-    }
+    if (r != 4) return io_failed(e, "bridge write", 0, reg, r);
     return 0;
 }
 
@@ -176,24 +199,23 @@ static uint16_t i2c_wvalue(uint8_t addr8, int saddr_len) {
 
 int evc_i2c_read(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t *val, int len) {
     uint8_t b[4] = {0};
+    *val = 0;
+    if (len < 1 || len > 4 || saddr_len < 0 || saddr_len > 2) return -1;
+    if (e->io_err) return -1;
     int r = libusb_control_transfer(e->h, 0xc0, VRT_GET_I2C0, i2c_wvalue(addr8, saddr_len), saddr, b, len, 1000);
-    if (r != len) {
-        fprintf(stderr, "evc: i2c read %02x:%03x failed: %s\n", addr8, saddr, r < 0 ? libusb_error_name(r) : "short");
-        return -1;
-    }
-    *val = len == 1 ? b[0] : (b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24);
+    if (r != len) return io_failed(e, "i2c read", addr8, saddr, r);
+    *val = b[0] | b[1] << 8 | b[2] << 16 | (uint32_t)b[3] << 24;
     if (e->verbose > 1) fprintf(stderr, "  i2c  R %02x:%03x = %0*x\n", addr8, saddr, len * 2, *val);
     return 0;
 }
 
 int evc_i2c_write(evc *e, uint8_t addr8, uint16_t saddr, int saddr_len, uint32_t val, int len) {
     uint8_t b[4] = {val, val >> 8, val >> 16, val >> 24};
+    if (len < 1 || len > 4 || saddr_len < 0 || saddr_len > 2) return -1;
+    if (e->io_err) return -1;
     if (e->verbose > 1) fprintf(stderr, "  i2c  W %02x:%03x = %0*x\n", addr8, saddr, len * 2, val);
     int r = libusb_control_transfer(e->h, 0x40, VRT_SET_I2C0, i2c_wvalue(addr8, saddr_len), saddr, b, len, 1000);
-    if (r != len) {
-        fprintf(stderr, "evc: i2c write %02x:%03x failed: %s\n", addr8, saddr, r < 0 ? libusb_error_name(r) : "short");
-        return -1;
-    }
+    if (r != len) return io_failed(e, "i2c write", addr8, saddr, r);
     return 0;
 }
 
@@ -236,7 +258,7 @@ static int afe_init_super_block(evc *e, uint32_t ref_count) {
     /* enable PLL */
     for (int i = 0; st != 0x18; i++) {
         if (i == 10) {
-            fprintf(stderr, "evc: AFE PLL did not power up (status %02x)\n", st);
+            elog(e, "evc: AFE PLL did not power up (status %02x)\n", st);
             return -1;
         }
         if (afe_w(e, SUP_BLK_PWRDN, 0x18) || afe_r(e, SUP_BLK_PWRDN, &st)) return -1;
@@ -571,19 +593,19 @@ int evc_open(evc **out, int verbose) {
     if (libusb_init(&e->ctx)) goto fail;
     e->h = libusb_open_device_with_vid_pid(e->ctx, EVC_VID, EVC_PID);
     if (!e->h) {
-        fprintf(stderr, "evc: no Elgato Video Capture (%04x:%04x) found, or it could not be opened\n", EVC_VID, EVC_PID);
+        elog(e, "evc: no Elgato Video Capture (%04x:%04x) found, or it could not be opened\n", EVC_VID, EVC_PID);
         goto fail;
     }
     struct libusb_device_descriptor dd;
     if (libusb_get_device_descriptor(libusb_get_device(e->h), &dd) == 0) e->bcd_device = dd.bcdDevice;
     int r = libusb_claim_interface(e->h, VIDEO_IFACE);
     if (r) {
-        fprintf(stderr, "evc: cannot claim video interface: %s\n", libusb_error_name(r));
+        elog(e, "evc: cannot claim video interface: %s\n", libusb_error_name(r));
         goto fail;
     }
     e->claimed_video = 1;
     r = libusb_claim_interface(e->h, AUDIO_IFACE);
-    if (r) fprintf(stderr, "evc: cannot claim audio interface (%s); continuing without audio\n", libusb_error_name(r));
+    if (r) elog(e, "evc: cannot claim audio interface (%s); continuing without audio\n", libusb_error_name(r));
     else e->claimed_audio = 1;
     e->frame = malloc(LINE_BYTES * MAX_HEIGHT);
     if (!e->frame) goto fail;
@@ -599,6 +621,12 @@ fail:
 void evc_close(evc *e) {
     if (!e) return;
     if (e->streaming) evc_stop(e);
+    if (e->leaked) {
+        /* evc_stop could not get every transfer back. libusb may still complete them and
+         * call into this object, so the only safe thing is to give all of it up. */
+        elog(e, "evc: transfers still in flight at close; leaking the device handle\n");
+        return;
+    }
     if (e->h) {
         if (e->claimed_video) libusb_release_interface(e->h, VIDEO_IFACE);
         if (e->claimed_audio) libusb_release_interface(e->h, AUDIO_IFACE);
@@ -612,12 +640,13 @@ void evc_close(evc *e) {
 
 int evc_init(evc *e, evc_std std, evc_input input) {
     uint32_t v;
+    e->io_err = 0;
     e->std = std;
     e->input = input;
     set_geometry(e);
 
     if (evc_reg_read(e, BOARD_CFG_STAT, &v)) return -1;
-    if (e->verbose) fprintf(stderr, "evc: board config %08x, hardware revision %04x\n", v, e->bcd_device);
+    if (e->verbose) elog(e, "evc: board config %08x, hardware revision %04x\n", v, e->bcd_device);
 
     if (set_power_external_av(e)) return -1;
     if (afe_init_super_block(e, AFE_REF_COUNT)) return -1;
@@ -633,26 +662,40 @@ int evc_init(evc *e, evc_std std, evc_input input) {
     if (set_audio_line_in(e)) return -1;
     if (mode_overrides(e)) return -1;
     if (decoder_set_std(e)) return -1;
-    return mode_overrides(e);
+    mode_overrides(e);
+    /* vendor: neutral picture controls (the cx25840 defaults differ slightly). These are
+     * the values evc_set_brightness() etc. produce at 128 / 128 / 128 / 0. */
+    vid_w8(e, 0x414, 0x00);
+    vid_w8(e, 0x415, 0x80);
+    vid_w8(e, 0x420, 0x80);
+    vid_w8(e, 0x421, 0x80);
+    vid_w8(e, 0x422, 0x00);
+    /* many helpers above ignore individual results; the sticky flag catches all of them */
+    return e->io_err ? -1 : 0;
 }
 
 int evc_set_std(evc *e, evc_std std) {
     if (e->streaming) return -1;
+    e->io_err = 0;
     e->std = std;
     set_geometry(e);
-    if (decoder_set_std(e)) return -1;
-    return mode_overrides(e);
+    decoder_set_std(e);
+    mode_overrides(e);
+    return e->io_err ? -1 : 0;
 }
 
 int evc_set_input(evc *e, evc_input input) {
+    e->io_err = 0;
     e->input = input;
-    if (set_video_input(e)) return -1;
-    if (set_audio_line_in(e)) return -1;
-    return mode_overrides(e);
+    set_video_input(e);
+    set_audio_line_in(e);
+    mode_overrides(e);
+    return e->io_err ? -1 : 0;
 }
 
 int evc_get_signal(evc *e, evc_signal *sig) {
     uint32_t v;
+    e->io_err = 0;
     if (vid_r32(e, GEN_STAT, &v)) return -1;
     sig->gen_stat = v;
     sig->video_present = !!(v & 0x00200000);
@@ -675,7 +718,7 @@ evc_std evc_autodetect_std(evc *e) {
         same = sig.detected_fmt == fmt ? same + 1 : 1;
         fmt = sig.detected_fmt;
     }
-    if (same < 3) return e->std;
+    if (same < 3 || fmt == 0) return e->std;
     /* 4 PAL-BDGHI, 6 PAL-N, 7 PAL-Nc, 0xc SECAM are 625-line; the rest are 525-line */
     evc_std want = (fmt == 4 || fmt == 6 || fmt == 7 || fmt == 0xc) ? EVC_STD_PAL : EVC_STD_NTSC;
     if (want != e->std) evc_set_std(e, want);
@@ -683,13 +726,17 @@ evc_std evc_autodetect_std(evc *e) {
 }
 
 static int clamp8(int v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
-int evc_set_brightness(evc *e, int v) { return vid_w8(e, 0x414, (uint8_t)(clamp8(v) - 128)); }
-int evc_set_contrast(evc *e, int v) { return vid_w8(e, 0x415, clamp8(v)); }
-int evc_set_saturation(evc *e, int v) { return vid_w8(e, 0x420, clamp8(v)) | vid_w8(e, 0x421, clamp8(v)); }
-int evc_set_hue(evc *e, int v) { return vid_w8(e, 0x422, (uint8_t)(int8_t)(v < -128 ? -128 : v > 127 ? 127 : v)); }
+static int pic_w(evc *e, uint16_t reg, uint8_t v) {
+    e->io_err = 0;
+    return vid_w8(e, reg, v);
+}
+int evc_set_brightness(evc *e, int v) { return pic_w(e, 0x414, (uint8_t)(clamp8(v) - 128)); }
+int evc_set_contrast(evc *e, int v) { return pic_w(e, 0x415, clamp8(v)); }
+int evc_set_saturation(evc *e, int v) { return pic_w(e, 0x420, clamp8(v)) | pic_w(e, 0x421, clamp8(v)); }
+int evc_set_hue(evc *e, int v) { return pic_w(e, 0x422, (uint8_t)(int8_t)(v < -128 ? -128 : v > 127 ? 127 : v)); }
 
 int evc_height(evc *e) { return e->height; }
-int evc_alive(evc *e) { return e->streaming && e->active_xfers > 0; }
+int evc_alive(evc *e) { return e->streaming && !e->stream_failed; }
 void evc_get_stats(evc *e, evc_stats *st) { *st = e->st; }
 
 /* ---------------------------------------------------------------- video stream parser */
@@ -773,6 +820,25 @@ static void parse_video(evc *e, const uint8_t *p, size_t n) {
 
 /* ---------------------------------------------------------------- streaming */
 
+#define MAX_BAD_XFERS 50 /* the vendor driver gives up on a pipe after the same number */
+
+/*
+ * Common tail of both completion callbacks. The pool of queued transfers must stay full:
+ * losing even one leaves the endpoint unserviced for part of every cycle. So anything that
+ * takes a transfer out of the pool while streaming marks the stream as failed, which
+ * evc_alive() reports and the host answers by reopening the device.
+ */
+static void requeue(evc *e, struct libusb_transfer *t, int *bad) {
+    if (t->status == LIBUSB_TRANSFER_COMPLETED) *bad = 0;
+    else if (t->status != LIBUSB_TRANSFER_CANCELLED && ++*bad >= MAX_BAD_XFERS) e->stream_failed = 1;
+
+    if (e->streaming && !e->stream_failed && t->status != LIBUSB_TRANSFER_CANCELLED &&
+        t->status != LIBUSB_TRANSFER_NO_DEVICE && libusb_submit_transfer(t) == 0)
+        return;
+    if (e->streaming) e->stream_failed = 1;
+    e->active_xfers--;
+}
+
 static void LIBUSB_CALL video_done(struct libusb_transfer *t) {
     evc *e = t->user_data;
     if (t->status == LIBUSB_TRANSFER_COMPLETED) {
@@ -780,7 +846,11 @@ static void LIBUSB_CALL video_done(struct libusb_transfer *t) {
             struct libusb_iso_packet_descriptor *d = &t->iso_packet_desc[i];
             e->st.iso_packets++;
             if (d->status != LIBUSB_TRANSFER_COMPLETED) {
+                /* bytes are missing: abandon the current line and find the next timing code,
+                 * rather than splice two lines together and miscount the rest of the field */
                 e->st.iso_errors++;
+                e->line_pos = -1;
+                e->sync = 0;
                 continue;
             }
             if (!d->actual_length) continue;
@@ -788,33 +858,29 @@ static void LIBUSB_CALL video_done(struct libusb_transfer *t) {
             if (e->dump) fwrite(libusb_get_iso_packet_buffer_simple(t, i), 1, d->actual_length, e->dump);
             parse_video(e, libusb_get_iso_packet_buffer_simple(t, i), d->actual_length);
         }
+    } else {
+        e->line_pos = -1;
+        e->sync = 0;
     }
-    if (e->streaming && t->status != LIBUSB_TRANSFER_CANCELLED && t->status != LIBUSB_TRANSFER_NO_DEVICE &&
-        libusb_submit_transfer(t) == 0)
-        return;
-    e->active_xfers--;
+    requeue(e, t, &e->bad_video);
 }
 
 static void LIBUSB_CALL audio_done(struct libusb_transfer *t) {
     evc *e = t->user_data;
     if (t->status == LIBUSB_TRANSFER_COMPLETED) {
-        static int16_t pcm[AUDIO_PKTS * 64];
         size_t n = 0;
         for (int i = 0; i < t->num_iso_packets; i++) {
             struct libusb_iso_packet_descriptor *d = &t->iso_packet_desc[i];
             if (d->status != LIBUSB_TRANSFER_COMPLETED || !d->actual_length) continue;
             size_t len = d->actual_length & ~3u;
-            if (n + len > sizeof(pcm)) break;
-            memcpy((uint8_t *)pcm + n, libusb_get_iso_packet_buffer_simple(t, i), len);
+            if (n + len > sizeof(e->pcm)) break;
+            memcpy((uint8_t *)e->pcm + n, libusb_get_iso_packet_buffer_simple(t, i), len);
             n += len;
         }
         e->st.audio_bytes += n;
-        if (n && e->acb) e->acb(e->user, pcm, n / 4, now_ns(e));
+        if (n && e->acb) e->acb(e->user, e->pcm, n / 4, now_ns(e));
     }
-    if (e->streaming && t->status != LIBUSB_TRANSFER_CANCELLED && t->status != LIBUSB_TRANSFER_NO_DEVICE &&
-        libusb_submit_transfer(t) == 0)
-        return;
-    e->active_xfers--;
+    requeue(e, t, &e->bad_audio);
 }
 
 static int start_iso(evc *e, struct libusb_transfer **x, int count, int pkts, int iface, int alt, uint8_t ep,
@@ -822,30 +888,35 @@ static int start_iso(evc *e, struct libusb_transfer **x, int count, int pkts, in
     /* the size must come from the selected alternate setting (alt 0 is a bulk placeholder) */
     int mps = libusb_get_max_alt_packet_size(libusb_get_device(e->h), iface, alt, ep);
     if (mps <= 0) {
-        fprintf(stderr, "evc: endpoint %02x has no isochronous packet size\n", ep);
+        elog(e, "evc: endpoint %02x has no isochronous packet size\n", ep);
         return -1;
     }
     for (int i = 0; i < count; i++) {
         x[i] = libusb_alloc_transfer(pkts);
         uint8_t *buf = malloc((size_t)mps * pkts);
-        if (!x[i] || !buf) return -1;
+        if (!x[i] || !buf) {
+            free(buf);
+            return -1;
+        }
         libusb_fill_iso_transfer(x[i], e->h, ep, buf, mps * pkts, pkts, cb, e, 0);
         x[i]->flags = LIBUSB_TRANSFER_FREE_BUFFER;
         libusb_set_iso_packet_lengths(x[i], mps);
         int r = libusb_submit_transfer(x[i]);
         if (r) {
-            fprintf(stderr, "evc: submit on endpoint %02x failed: %s\n", ep, libusb_error_name(r));
+            elog(e, "evc: submit on endpoint %02x failed: %s\n", ep, libusb_error_name(r));
             return -1;
         }
         e->active_xfers++;
     }
-    if (e->verbose) fprintf(stderr, "evc: endpoint %02x streaming, %d bytes/packet\n", ep, mps);
+    if (e->verbose) elog(e, "evc: endpoint %02x streaming, %d bytes/packet\n", ep, mps);
     return 0;
 }
 
 int evc_start(evc *e, evc_video_cb vcb, evc_audio_cb acb, void *user) {
     int r;
-    if (e->streaming) return -1;
+    if (e->streaming || e->leaked) return -1;
+    e->io_err = 0;
+    e->stream_failed = e->bad_video = e->bad_audio = 0;
     e->vcb = vcb;
     e->acb = acb;
     e->user = user;
@@ -855,7 +926,7 @@ int evc_start(evc *e, evc_video_cb vcb, evc_audio_cb acb, void *user) {
     memset(e->frame, 0, LINE_BYTES * MAX_HEIGHT);
 
     if ((r = libusb_set_interface_alt_setting(e->h, VIDEO_IFACE, VIDEO_ALT))) {
-        fprintf(stderr, "evc: cannot select video alt setting: %s\n", libusb_error_name(r));
+        elog(e, "evc: cannot select video alt setting: %s\n", libusb_error_name(r));
         return -1;
     }
     e->streaming = 1;
@@ -865,7 +936,7 @@ int evc_start(evc *e, evc_video_cb vcb, evc_audio_cb acb, void *user) {
 
     if (acb && e->claimed_audio) {
         if ((r = libusb_set_interface_alt_setting(e->h, AUDIO_IFACE, AUDIO_ALT))) {
-            fprintf(stderr, "evc: cannot select audio alt setting: %s\n", libusb_error_name(r));
+            elog(e, "evc: cannot select audio alt setting: %s\n", libusb_error_name(r));
         } else if (start_iso(e, e->ax, N_AUDIO_XFERS, AUDIO_PKTS, AUDIO_IFACE, AUDIO_ALT, AUDIO_EP, audio_done) == 0) {
             /* Linux also ORs 0x9300 into TS_MODE_REG here; the vendor driver does that only
              * for audio embedded in the HANC stream, which this board does not use. */
@@ -879,14 +950,22 @@ int evc_stop(evc *e) {
     uint32_t v;
     if (!e->streaming) return 0;
     e->streaming = 0;
+    e->io_err = 0;
     if (evc_reg_read(e, EP_MODE_SET, &v) == 0) reg_write(e, EP_MODE_SET, v & ~(uint32_t)(ENABLE_EP3 | ENABLE_EP4));
     for (int i = 0; i < N_VIDEO_XFERS; i++)
         if (e->vx[i]) libusb_cancel_transfer(e->vx[i]);
     for (int i = 0; i < N_AUDIO_XFERS; i++)
         if (e->ax[i]) libusb_cancel_transfer(e->ax[i]);
-    for (int tries = 0; e->active_xfers > 0 && tries < 100; tries++) {
+    /* every submitted transfer comes back through its callback, cancelled or not */
+    for (int tries = 0; e->active_xfers > 0 && tries < 250; tries++) {
         struct timeval tv = {0, 20000};
         libusb_handle_events_timeout(e->ctx, &tv);
+    }
+    if (e->active_xfers > 0) {
+        /* libusb still owns some transfers after 5 s. Freeing them, or this object, would
+         * be a use-after-free when they do complete; evc_close() leaks instead. */
+        e->leaked = 1;
+        return -1;
     }
     for (int i = 0; i < N_VIDEO_XFERS; i++) {
         if (e->vx[i]) libusb_free_transfer(e->vx[i]);
@@ -896,7 +975,6 @@ int evc_stop(evc *e) {
         if (e->ax[i]) libusb_free_transfer(e->ax[i]);
         e->ax[i] = NULL;
     }
-    e->active_xfers = 0;
     libusb_set_interface_alt_setting(e->h, VIDEO_IFACE, 0);
     if (e->claimed_audio) libusb_set_interface_alt_setting(e->h, AUDIO_IFACE, 0);
     return 0;
