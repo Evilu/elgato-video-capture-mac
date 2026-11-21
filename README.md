@@ -102,10 +102,17 @@ Nothing has to be placed in the repository by hand. The build downloads the libo
 
 | You need | Where it goes | Notes |
 |---|---|---|
-| `Video_Capture_Driver_Installer.exe` | The top folder of the repository, next to `build.sh`, with exactly that name | Elgato's Windows driver installer for Video Capture, from Elgato's downloads page. For a copy somewhere else: `tools/unpack.sh /path/to/installer.exe` |
+| `Video_Capture_Driver_Installer.exe` | The top folder of the repository, next to `build.sh`, with exactly that name | Elgato's Windows driver installer for Video Capture: the **Download Driver for Elgato Video Capture** link on [Elgato's Video Capture support page](https://www.elgato.com/us/en/s/video-capture-support), under "Download for Windows". For a copy somewhere else: `tools/unpack.sh /path/to/installer.exe` |
 | 7-Zip, Ghidra, a Java 21 runtime | Installed by `brew install sevenzip ghidra openjdk@21` | |
 
-The installer this project was developed against is version 7.07.0.127, 3,220,128 bytes, SHA-256 `3ba345bb3b9d21e264d31f1e78333c78ef6ce856c6615f28dffe7fb906b463f7`. A different version may unpack and decompile differently, and the function addresses quoted in `docs/` apply only to this one.
+To download it from the terminal, straight into place (this is the address Elgato's link leads to):
+
+```sh
+curl -L -o Video_Capture_Driver_Installer.exe https://gc-updates.elgato.com/windows/drivers/vc/download.php
+shasum -a 256 Video_Capture_Driver_Installer.exe
+```
+
+The installer this project was developed against is version 7.07.0.127, 3,220,128 bytes, SHA-256 `3ba345bb3b9d21e264d31f1e78333c78ef6ce856c6615f28dffe7fb906b463f7`. Elgato's link served exactly this file when checked on 2026-11-21. A different version may unpack and decompile differently, and the function addresses quoted in `docs/` apply only to this one.
 
 Then `./build.sh analyse` produces, all inside the git-ignored `analysis/` folder:
 
