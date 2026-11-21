@@ -1,0 +1,11 @@
+# Vendor files are never committed: the user supplies their own installer.
+*.exe
+*.msi
+*.sys
+*.dll
+*.inf
+*.cat
+*.bin
+/analysis/
+/out/
+.DS_Store
